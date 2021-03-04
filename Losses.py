@@ -2,126 +2,152 @@ import torch
 import torch.nn as nn
 from Util import *
 import torch.nn.functional as F
-import numpy as np
-from DataLists import all_multi_labels
+
+ancs_xywh = create_priors_ssd300()
+ancs_xyxy = xywh_to_xyxy(ancs_xywh)
+use_cuda = torch.cuda.is_available()  # check if GPU exists
+device = torch.device("cuda" if use_cuda else "cpu")  # use CPU or GPU
+
+def inference(l_, c_, index, top_k = 200, phase = 'train'):
+    """
+    :param l_: predicts offsets (gcxgcy) (8732,4)
+    :param c_: (8732,21)
+    :param index:
+    :return:
+    """
+
+    all_pred_bboxes = []
+    all_pred_prob = []
+    all_pred_class = []
+
+    all_bboxs_xywh = gcxgcy_to_cxcy(l_, ancs_xywh).to(device)
+
+    all_probs = F.softmax(c_, dim=1)
+
+    for c in range(20):
+        min_score = 0.2
+
+        all_bbox_class = all_bboxs_xywh.to(device)
+        all_prob_class = all_probs[:, c].to(device)
+
+        pos_ancs = all_prob_class >= min_score
+        if pos_ancs.sum().item() == 0: continue
+
+        all_bbox_class = all_bbox_class[pos_ancs].to(device)
+        all_prob_class = all_prob_class[pos_ancs].to(device)
+
+        all_prob_class, sort_ind = all_prob_class.sort(dim=0, descending=True)  # (n_qualified), (n_min_score)
+        all_bbox_class = all_bbox_class[sort_ind].to(device)  # (n_min_score, 4)
+
+        jacc = get_jaccard_tensor1(xywh_to_xyxy(all_bbox_class), xywh_to_xyxy(all_bbox_class)).to(device)
+        suppress = torch.zeros((pos_ancs.sum()), dtype=torch.bool).to(device)  # (n_qualified)
+
+        for box in range(all_bbox_class.size(0)):
+            # If this box is already marked for suppression
+            if suppress[box] == 1:
+                continue
+
+            # Suppress boxes whose overlaps (with this box) are greater than maximum overlap
+            # Find such boxes and update suppress indices
+            suppress = torch.max(suppress, jacc[box,:] >= 0.45)
+            # The max operation retains previously suppressed boxes, like an 'OR' operation
+
+            # Don't suppress this box, even though it has an overlap of 1 with itself
+            suppress[box] = 0
 
 
+        all_pred_bboxes.append(all_bbox_class[~suppress].cpu().detach())
+        all_pred_prob.append(all_prob_class[~suppress].cpu().detach())
+        all_pred_class.append(torch.Tensor([c] * (~suppress).sum().item()))
 
-def get_predictions_inf(outputs, index, device, k=9, threshold=0.75):
-    ancs_xywh = create_ancs_xywh_zoom_ratio()
+    if len(all_pred_bboxes)==0:
+        return
+    sum=0
+    for i in all_pred_bboxes:
+        sum+=len(i)
+    print(sum)
 
-    p_ancs_xywh_, p_labels_ = get_p_bbox_labels_za(outputs, ancs_xywh, device, apply_softmax=True)
+    print(len(all_pred_bboxes), len(all_pred_prob), len(all_pred_class))
 
-    p_ancs_xywh, p_labels = p_ancs_xywh_[0], p_labels_[0]
-    # soft = nn.Softmax(dim=1)
-    p_labels = torch.sigmoid(p_labels)
+    all_pred_bboxes_xyxy = xywh_to_xyxy(torch.cat(all_pred_bboxes)).to(device)
+    all_pred_prob= torch.cat(all_pred_prob).to(device)
+    all_pred_class = torch.cat(all_pred_class).long().to(device)
 
-    pred_probs, pred_classes = p_labels.max(dim=1)
-    # print(pred_probs)
-    # print(pred_classes)
+    print(all_pred_bboxes_xyxy.shape, all_pred_prob.shape, all_pred_class.shape)
 
-    pos_ancs = pred_probs >= pred_probs.max().item() * threshold
+    if all_pred_bboxes_xyxy.shape[0] > top_k:
+        all_pred_prob, sort_ind = all_pred_prob.sort(dim=0, descending=True)
+        all_pred_prob = all_pred_prob[:top_k]  # (top_k)
+        all_pred_bboxes_xyxy = all_pred_bboxes_xyxy[sort_ind][:top_k]  # (top_k, 4)
+        all_pred_class = all_pred_class[sort_ind][:top_k]  # (top_k)
 
-    return p_ancs_xywh[pos_ancs], p_labels[pos_ancs]
+    lbs_set = set([class_to_label[i] for i in all_pred_class.tolist()])
+    lbs = list([class_to_label[i] for i in all_pred_class.tolist()])
+    for i in lbs_set: print(i, lbs.count(i), end =" ")
 
+    w,h = get_img_sz(all_images[phase][index])
 
-def get_predictions_noinf(outputs, index, device, k=9):
-    ancs_xywh = create_ancs_xywh_zoom_ratio()
+    draw_image_with_ancs_xyxy(all_images[phase][index],
+                              all_pred_bboxes_xyxy * torch.FloatTensor([w, h, w, h]).unsqueeze(0).to(device),
+                              [class_to_label[all_pred_class[i]] for i in range(all_pred_class.shape[0])],
+                              all_pred_prob
+                              )
 
-    p_ancs_xywh_, p_labels_ = get_p_bbox_labels_za(outputs, ancs_xywh, device, apply_softmax=True)
-
-    p_ancs_xywh, p_labels = p_ancs_xywh_[0], p_labels_[0]
-    jacc = get_jaccard(index, get_diags_yxyx_from_xywh(ancs_xywh))
-    map_anc_to_labels, map_anc_to_idx = map_anc_to_bb(jacc, all_multi_labels[index])
-    # print(map_anc_to_idx)
-    pos_ancs = map_anc_to_idx >= 0
-    pos_ancs = pos_ancs.to(device)
-
-    return p_ancs_xywh[pos_ancs], p_labels[pos_ancs]
-
-
-def ssd(outputs, tr_labels, tr_bboxs, tr_indxs, print_it=False, k=9):
-    use_cuda = torch.cuda.is_available()  # check if GPU exists
-    device = torch.device("cuda" if use_cuda else "cpu")  # use CPU or GPU
-
+def ssd(outputs, tr_classes, tr_bboxs):
+    """
+    :param outputs: (bs, 8732, 4), (bs, 8732, 21)
+    :param tr_classes:
+    :param tr_bboxs:
+    :param tr_indxs:
+    :return:
+    """
+    bs = len(tr_bboxs)
     lbb = 0.0
     lc = 0.0
-    ancs_xywh = create_ancs_xywh_zoom_ratio()
+    pred_bb_offsets, pred_class_scores = outputs
 
-    p_ancs_xywh_s, p_labels = get_p_bbox_labels_za(outputs, ancs_xywh, device, apply_softmax=True)
-    # print(p_ancs_xywh.shape)
-
-    count = 0
-    for p_ancs_xywh, p_label, tr_bbox, tr_label, tr_idx in zip(p_ancs_xywh_s, p_labels, tr_bboxs, tr_labels, tr_indxs):
-        lc_, lbb_ = ssd1(p_ancs_xywh, p_label, remove_padding(tr_bbox), tr_label, tr_idx, device,
-                         printit=(count == 10) and (print_it))
-        # print(lc_, lbb_)
-        count += 1
+    for pred_bb_offset, pred_class_score, tr_bbox, tr_class in zip(pred_bb_offsets, pred_class_scores, tr_bboxs, tr_classes):
+        lc_, lbb_ = ssd1(pred_bb_offset, pred_class_score, tr_bbox, tr_class)
         lbb += lbb_
         lc += lc_
-    if print_it == True:
-        print(lbb, lc)
-
-    return lbb, lc
+    return lbb/bs, lc/bs
 
 
-def ssd1(p_ancs_xywh, p_label, tr_bbox, tr_label, index, device, k=9, printit=False):
-    p_ancs_xywh = p_ancs_xywh.to(device)
-    jacc = get_jaccard(index, get_diags_yxyx_from_xywh(create_ancs_xywh_zoom_ratio()))
-    map_anc_to_labels, map_anc_to_idx = map_anc_to_bb(jacc, all_multi_labels[index])
-    # print(map_anc_to_idx)
-    pos_ancs = map_anc_to_idx >= 0
-    pos_ancs = pos_ancs.to(device)
+def ssd1(pred_bb_offset, pred_class_score, tr_bbox, tr_class):
+    """
+    :param pred_bb_offset: (8732,4)
+    :param pred_class_score: (8732,21)
+    :param tr_bbox:
+    :return:
+    """
+    smooth_l1 = nn.L1Loss()
 
-    map_anc_to_idx_pos = map_anc_to_idx[pos_ancs]
-    map_anc_to_idx_pos = map_anc_to_idx_pos.to(device)
-    # print(index)
+    jacc = get_jaccard_tensor1(tr_bbox, ancs_xyxy) # (#bboxes,8732)
+    map_prior_to_class, map_prior_to_obj = map_prior_to_bb(jacc, tr_class)
+    gt_locations = xyxy_to_xywh(tr_bbox[map_prior_to_obj])
 
-    map_anc_to_class = torch.Tensor(np.array([label_to_class[v] if v != 'bg' else -1 for v in map_anc_to_labels]))
+    true_classes = map_prior_to_class.to(torch.int64).to(device)    #(8732),
+    pos_ancs = (true_classes != 20).to(device)                      #(8732)
 
-    map_anc_to_class[map_anc_to_class < 0] = 20
+    cce = F.cross_entropy(pred_class_score.to(device), true_classes, reduce=False)
+    cce1 = cce.clone()                                              #(8732)
+    cce1[pos_ancs] = 0.0
+    cce1, _ = cce1.sort(descending=True)
+    c_loss = (cce[pos_ancs].sum() + cce1[:3*pos_ancs.sum()].sum()) / pos_ancs.sum().float()
 
-    if printit == True:
-        print([class_to_label[int(i)] for i in map_anc_to_class])
-    # gets example_idx of each of the positive anc, it will be used to get gt_bb
-    targets = torch.nn.functional.one_hot(map_anc_to_class.to(torch.int64), 21).float()
-    # print(p_label.shape)
-    predss = p_label.to(device)
+    loc_loss = smooth_l1(pred_bb_offset[pos_ancs, :], get_offsets_coords(gt_locations[pos_ancs, :], ancs_xywh[pos_ancs, :]).to(device))
 
-    if printit == True:
-        print([class_to_label[i] for i in predss.max(axis=1)[1]])
-    # print("preds",predss.argmax(axis=0))
-    # print("targets", targets.argmax(axis=0))
-
-    p, t = predss[:, :-1], targets[:, :-1].to(device)
-    loss_f = BCE_Loss()
-    c_loss = loss_f(p, t)
-    # print(map_anc_to_idx_pos)
-    # print(tr_bbox)
-    tr_bbox = tr_bbox.to(device)
-    gg = tr_bbox[map_anc_to_idx_pos]
-    # print(pos_ancs.shape, p_ancs_xywh.shape)
-    pp = p_ancs_xywh[pos_ancs]
-    # print("gg",gg)
-    # print("pp",pp)
-    diff = gg.to(device) - pp.to(device)
-    # print(diff)
-    l1_loss = diff.abs().mean()
-    # print(c_loss, l1_loss)
-
-    return c_loss, l1_loss
+    return c_loss, loc_loss
 
 
-class BCE_Loss(nn.Module):
+class Focal_Loss(nn.Module):
     def __init__(self):
         super().__init__()
         self.num_classes = 20
 
     def forward(self, p, t):
-        # w = self.get_weight(p,t)
-        return F.binary_cross_entropy_with_logits(p, t)
-        # return F.binary_cross_entropy_with_logits(p, t, w.detach(),
-        #                     size_average=False)/self.num_classes
+        w = self.get_weight(p,t)
+        return F.binary_cross_entropy_with_logits(p, t, w.detach())
 
     def get_weight(self, x, t):
         alpha, gamma = 0.25, 2.
@@ -129,5 +155,3 @@ class BCE_Loss(nn.Module):
         pt = p * t + (1 - p) * (1 - t)
         w = alpha * t + (1 - alpha) * (1 - t)
         return w * (1 - pt).pow(gamma)
-
-

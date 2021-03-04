@@ -1,76 +1,80 @@
 from fastai.vision import *
 import json
-from Util import get_largest_bbox_with_label
-import numpy as np
-import torch
 
 path = Path('pascal_2007/')
 
-annots = json.load(open(path/'train.json'))
-
 train_images, train_lbl_bbox = get_annotations(path/'train.json')
 val_images, val_lbl_bbox = get_annotations(path/'valid.json')
+test_images, test_lbl_bbox = get_annotations(path/'test.json')
 
+all_images = {}
+all_multi_labels = {}
+all_multi_bboxes = {}
 
-all_images = []
-for images in train_images:
-    all_images.append(path/'train'/images)
+def get_all_images(isTrainData=True):
+  all_images = []
+  if isTrainData:
+    for image in train_images+val_images:
+      all_images.append(path / 'train' / image)
+  else:
+    for image in test_images:
+      all_images.append(path / 'test' / image)
 
-for images in val_images:
-    all_images.append(path/'train'/images)
+  return all_images
 
-all_multi_labels = []
-for idx in range(len(train_images)):
-  all_multi_labels.append(train_lbl_bbox[idx][1])
+def get_all_multi_labels(isTrainData=True):
+  all_multi_labels = []
+  if isTrainData:
+    for idx in range(len(train_images)):
+      all_multi_labels.append(train_lbl_bbox[idx][1])
+    for idx in range(len(val_images)):
+      all_multi_labels.append(val_lbl_bbox[idx][1])
 
+  else:
+    for idx in range(len(test_images)):
+      all_multi_labels.append(test_lbl_bbox[idx][1])
 
-for idx in range(len(val_images)):
-  all_multi_labels.append(val_lbl_bbox[idx][1])
+  return all_multi_labels
 
-
-all_labels = []
-for idx in range(len(train_images)):
-  all_labels.append(get_largest_bbox_with_label(train_lbl_bbox[idx])[1][0])
-
-
-for idx in range(len(val_images)):
-  all_labels.append(get_largest_bbox_with_label(val_lbl_bbox[idx])[1][0])
-
-
-all_bboxes = []
-for idx in range(len(train_images)):
-  l = get_largest_bbox_with_label(train_lbl_bbox[idx])[0][0]
-  f = [float(i) for i in l]
-  all_bboxes.append(f)
-
-
-for idx in range(len(val_images)):
-  l = get_largest_bbox_with_label(val_lbl_bbox[idx])[0][0]
-  f = [float(i) for i in l]
-  all_bboxes.append(f)
 
 def convert_list_to_float(l):
-  return [float(i) for i in l]
-
-all_multi_bboxes = []
-for idx in range(len(train_images)):
-  l = train_lbl_bbox[idx][0]
-  f = [convert_list_to_float(i) for i in l]
-  all_multi_bboxes.append(f)
+  l =  [float(i) for i in l]
+  l[0], l[1], l[2], l[3] = l[1], l[0], l[3], l[2]
+  return l
 
 
-for idx in range(len(val_images)):
-  l = val_lbl_bbox[idx][0]
-  f = [convert_list_to_float(i) for i in l]
-  all_multi_bboxes.append(f)
+def get_all_multi_bboxes(isTrainData=True):
+  all_multi_bboxes = []
 
-def denormalize(input):
-    mean = np.array([0.485, 0.456, 0.406])
-    std = np.array([0.229, 0.224, 0.225])
-    return np.multiply(std,input) + mean
+  if isTrainData:
+    for idx in range(len(train_images)):
+      l = train_lbl_bbox[idx][0]
+      f = [convert_list_to_float(i) for i in l]
+      all_multi_bboxes.append(f)
 
-def one_zero(t, n):
-  output = torch.zeros(n)
-  for i in t:
-    output[i]=1
-  return output
+    for idx in range(len(val_images)):
+      l = val_lbl_bbox[idx][0]
+      f = [convert_list_to_float(i) for i in l]
+      all_multi_bboxes.append(f)
+  else:
+    for idx in range(len(test_images)):
+      l = test_lbl_bbox[idx][0]
+      f = [convert_list_to_float(i) for i in l]
+      all_multi_bboxes.append(f)
+
+  return all_multi_bboxes
+
+
+def call_on_load():
+  global all_images, all_multi_labels, all_multi_bboxes
+
+  all_images_tr_val, all_images_test = get_all_images(), get_all_images(isTrainData=False)
+  all_multi_bboxes_tr_val, all_multi_bboxes_test = get_all_multi_bboxes(), get_all_multi_bboxes(isTrainData=False)
+  all_multi_labels_tr_val, all_multi_labels_test = get_all_multi_labels(), get_all_multi_labels(isTrainData=False)
+
+  all_images['train'] = all_images_tr_val
+  all_images['test'] = all_images_test
+  all_multi_bboxes['train'] = all_multi_bboxes_tr_val
+  all_multi_bboxes['test'] = all_multi_bboxes_test
+  all_multi_labels['train'] = all_multi_labels_tr_val
+  all_multi_labels['test'] = all_multi_labels_test
