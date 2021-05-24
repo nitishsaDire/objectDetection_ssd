@@ -35,6 +35,8 @@ The combined effect is model is trained to find objects and also trained to diff
 # Results
 I have tried training on PASCAL VOC 2007 trainval dataset, without augmentations, and it resulted in overfitting
 on the training dataset. I will be training it on combined PASCAL VOC 2007
-trainval + PASCAL VOC 2012 trainval, and will also add augmentations. New model and its results
+trainval + PASCAL VOC 2012 trainval, and will also add augmentations. The new model and its results
 will be available soon.
+
+
 
