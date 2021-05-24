@@ -39,4 +39,7 @@ trainval + PASCAL VOC 2012 trainval, and will also add augmentations. The new mo
 will be available soon.
 
 
+Some of the functions are adapted from this wonderful repo https://github.com/sgrvinod/a-PyTorch-Tutorial-to-Object-Detection
+
+
 
