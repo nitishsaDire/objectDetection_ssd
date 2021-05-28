@@ -93,7 +93,7 @@ def inference(l_, c_, index, top_k = 200, phase = 'train'):
                               all_pred_prob
                               )
 
-def ssd(outputs, tr_classes, tr_bboxs):
+def ssd_old(outputs, tr_classes, tr_bboxs):
     """
     :param outputs: (bs, 8732, 4), (bs, 8732, 21)
     :param tr_classes:
@@ -112,6 +112,88 @@ def ssd(outputs, tr_classes, tr_bboxs):
         lc += lc_
     return lbb/bs, lc/bs
 
+def ssd(outputs, tr_classes, tr_bboxs):
+    """
+    :param outputs: (bs, 8732, 4), (bs, 8732, 21)
+    :param tr_classes:
+    :param tr_bboxs:
+    :param tr_indxs:
+    :return:
+    """
+    pred_bb_offsets, pred_class_scores = outputs
+
+    jaccard = get_jaccard_tensor1(torch.cat(tr_bboxs).view(-1, 4), ancs_xyxy).to(device)
+    indices = np.array([0] + [i.shape[0] for i in tr_bboxs]).cumsum()
+
+    lc_, lbb_ = ssd1_(pred_bb_offsets, pred_class_scores, tr_bboxs, tr_classes, jaccard, indices)
+
+    return lbb_, lc_
+
+def ssd1_(pred_bb_offset, pred_class_score, tr_bbox, tr_class, jaccard, indices):
+    """
+
+    :param pred_bb_offset:
+    :param pred_class_score:
+    :param tr_bbox:
+    :param tr_class:
+    :param jaccard:
+    :param indices:
+    :return:
+    """
+    smooth_l1 = nn.L1Loss()
+    bs, n_ancs = pred_bb_offset.shape[0], pred_bb_offset.shape[1]
+
+    overlap_forEach_prior = []
+    obj_forEach_prior = []
+    for idx in range(bs):
+        overlap_forEach_prior__, obj_forEach_prior__ = jaccard[indices[idx]:indices[idx + 1], :].max(axis=0)  # (bs*n_tr, 8732)
+        overlap_forEach_prior.append(overlap_forEach_prior__)
+        obj_forEach_prior.append(obj_forEach_prior__ + indices[idx])
+
+    _, prior_forEach_obj = jaccard.max(axis=1) #(bs*n)
+
+
+    overlap_forEach_prior, obj_forEach_prior = torch.stack(overlap_forEach_prior).to(device), torch.stack(obj_forEach_prior).to(device)
+    prior_forEach_obj = prior_forEach_obj.to(device)
+
+    tr_bbox, tr_class = xyxy_to_xywh(torch.cat(tr_bbox)), torch.cat(tr_class)
+
+    for idx in range(bs):
+        obj_forEach_prior[idx,:][prior_forEach_obj[indices[idx]:indices[idx + 1]]] = \
+                                    torch.LongTensor(torch.arange(indices[idx],indices[idx + 1],1)).to(device)
+        overlap_forEach_prior[idx,:][prior_forEach_obj[indices[idx]:indices[idx + 1]]] = 1.
+
+    class_forEach_prior = tr_class[obj_forEach_prior]
+
+    class_forEach_prior[overlap_forEach_prior < 0.5] = 20
+    global obj_forEach_prior___
+    obj_forEach_prior___ = class_forEach_prior.clone()
+
+    map_prior_to_class, map_prior_to_obj = class_forEach_prior, obj_forEach_prior
+
+    gt_locations = tr_bbox[map_prior_to_obj]
+    true_classes = map_prior_to_class.to(torch.int64).to(device)
+    pos_ancs = (true_classes != 20).to(device)  # (8732)
+
+    offsets = get_offsets_coords(gt_locations[pos_ancs, :], ancs_xywh.unsqueeze(0).repeat_interleave(bs,0)[pos_ancs])
+    loc_loss = smooth_l1(pred_bb_offset[pos_ancs, :], offsets)
+
+    cce = F.cross_entropy(pred_class_score.view(-1, 21) , true_classes.view(-1), reduction='none')
+    cce = cce.view(bs, n_ancs)
+    pos_loss = cce[pos_ancs]
+
+    cce1 = cce.clone()
+    neg_ancs = 3 * pos_ancs.sum(dim=1)
+    cce1[pos_ancs] = 0.
+    cce1, _ = cce1.sort(dim=1, descending=True)
+
+    numbering_ancs = torch.LongTensor(range(n_ancs)).unsqueeze(0).expand_as(cce1).to(device)
+    hn = numbering_ancs < neg_ancs.unsqueeze(1)
+    HNloss = cce1[hn]
+
+    c_loss = (HNloss.sum().float() + pos_loss.sum().float()) / pos_ancs.sum().float()
+
+    return c_loss, loc_loss
 
 def ssd1(pred_bb_offset, pred_class_score, tr_bbox, tr_class):
     """
