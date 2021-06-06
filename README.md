@@ -37,6 +37,24 @@ I have trained on PASCAL VOC 2007 + 2012 trainval dataset,
 
 Loss function is plotted below:
 
+![plot](./Images/loss_fn.png)
 
+Inference Results:
 
+![plot](./Images/te1.png)
+![plot](./Images/te11.png)
+
+![plot](./Images/te2.png)
+![plot](./Images/te22.png)
+
+![plot](./Images/te3.png)
+![plot](./Images/te33.png)
+
+![plot](./Images/te4.png)
+![plot](./Images/te44.png)
+
+![plot](./Images/te5.png)
+![plot](./Images/te55.png)
+
+MAP:
 
