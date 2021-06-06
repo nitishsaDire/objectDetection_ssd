@@ -8,7 +8,7 @@ ancs_xyxy = xywh_to_xyxy(ancs_xywh)
 use_cuda = torch.cuda.is_available()  # check if GPU exists
 device = torch.device("cuda" if use_cuda else "cpu")  # use CPU or GPU
 
-def inference(l_, c_, index, top_k = 200, phase = 'train'):
+def inference(l_, c_, index, top_k = 200, phase = 'train', toDraw = True, min_score=0.2, iou_threshold=0.45):
     """
     :param l_: predicts offsets (gcxgcy) (8732,4)
     :param c_: (8732,21)
@@ -25,7 +25,6 @@ def inference(l_, c_, index, top_k = 200, phase = 'train'):
     all_probs = F.softmax(c_, dim=1)
 
     for c in range(20):
-        min_score = 0.2
 
         all_bbox_class = all_bboxs_xywh.to(device)
         all_prob_class = all_probs[:, c].to(device)
@@ -49,7 +48,7 @@ def inference(l_, c_, index, top_k = 200, phase = 'train'):
 
             # Suppress boxes whose overlaps (with this box) are greater than maximum overlap
             # Find such boxes and update suppress indices
-            suppress = torch.max(suppress, jacc[box,:] >= 0.45)
+            suppress = torch.max(suppress, jacc[box,:] >= iou_threshold)
             # The max operation retains previously suppressed boxes, like an 'OR' operation
 
             # Don't suppress this box, even though it has an overlap of 1 with itself
@@ -61,7 +60,7 @@ def inference(l_, c_, index, top_k = 200, phase = 'train'):
         all_pred_class.append(torch.Tensor([c] * (~suppress).sum().item()))
 
     if len(all_pred_bboxes)==0:
-        return
+        return [], [], []
     sum=0
     for i in all_pred_bboxes:
         sum+=len(i)
@@ -87,11 +86,16 @@ def inference(l_, c_, index, top_k = 200, phase = 'train'):
 
     w,h = get_img_sz(all_images[phase][index])
 
-    draw_image_with_ancs_xyxy(all_images[phase][index],
-                              all_pred_bboxes_xyxy * torch.FloatTensor([w, h, w, h]).unsqueeze(0).to(device),
-                              [class_to_label[all_pred_class[i]] for i in range(all_pred_class.shape[0])],
-                              all_pred_prob
-                              )
+    pred_bboxes = all_pred_bboxes_xyxy * torch.FloatTensor([w, h, w, h]).unsqueeze(0).to(device)
+    pred_labels = [class_to_label[all_pred_class[i]] for i in range(all_pred_class.shape[0])]
+
+    if toDraw == True:
+        draw_image_with_ancs_xyxy(all_images[phase][index],
+                                  pred_bboxes,
+                                  pred_labels,
+                                  all_pred_prob
+                                  )
+    return pred_bboxes, all_pred_class, all_pred_prob
 
 def ssd_old(outputs, tr_classes, tr_bboxs):
     """
@@ -153,14 +157,13 @@ def ssd1_(pred_bb_offset, pred_class_score, tr_bbox, tr_class, jaccard, indices)
     _, prior_forEach_obj = jaccard.max(axis=1) #(bs*n)
 
 
-    overlap_forEach_prior, obj_forEach_prior = torch.stack(overlap_forEach_prior).to(device), torch.stack(obj_forEach_prior).to(device)
-    prior_forEach_obj = prior_forEach_obj.to(device)
+    overlap_forEach_prior, obj_forEach_prior = torch.stack(overlap_forEach_prior).to(device), torch.stack(obj_forEach_prior).long().to(device)
+    prior_forEach_obj = prior_forEach_obj
 
     tr_bbox, tr_class = xyxy_to_xywh(torch.cat(tr_bbox)), torch.cat(tr_class)
-
     for idx in range(bs):
         obj_forEach_prior[idx,:][prior_forEach_obj[indices[idx]:indices[idx + 1]]] = \
-                                    torch.LongTensor(torch.arange(indices[idx],indices[idx + 1],1)).to(device)
+                        torch.tensor(torch.arange(indices[idx], indices[idx + 1], 1).long()).to(device)
         overlap_forEach_prior[idx,:][prior_forEach_obj[indices[idx]:indices[idx + 1]]] = 1.
 
     class_forEach_prior = tr_class[obj_forEach_prior]
@@ -172,8 +175,8 @@ def ssd1_(pred_bb_offset, pred_class_score, tr_bbox, tr_class, jaccard, indices)
     map_prior_to_class, map_prior_to_obj = class_forEach_prior, obj_forEach_prior
 
     gt_locations = tr_bbox[map_prior_to_obj]
-    true_classes = map_prior_to_class.to(torch.int64).to(device)
-    pos_ancs = (true_classes != 20).to(device)  # (8732)
+    true_classes = map_prior_to_class.to(torch.int64)
+    pos_ancs = (true_classes != 20)  # (8732)
 
     offsets = get_offsets_coords(gt_locations[pos_ancs, :], ancs_xywh.unsqueeze(0).repeat_interleave(bs,0)[pos_ancs])
     loc_loss = smooth_l1(pred_bb_offset[pos_ancs, :], offsets)
