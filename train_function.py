@@ -9,7 +9,7 @@ def get_lr(optimizer):
         return param_group['lr']
 
 
-def train_model(cnn, optimizer, scheduler, dataloader, dataset_sizes, device, loadModel=False, num_epochs=200):
+def train_model(cnn, optimizer, scheduler, dataloader, dataset_sizes, device, lr, loadModel=False, num_epochs=200):
     since = time.time()
     lbb = []
     lc = []
@@ -20,12 +20,14 @@ def train_model(cnn, optimizer, scheduler, dataloader, dataset_sizes, device, lo
 
     epoch = 0
 
-    OLD_PATH = 'ssd_1'
-    PATH = 'ssd_2'
+    OLD_PATH = '/content/drive/MyDrive/ssd_4'
+    PATH = '/content/drive/MyDrive/ssd_5'
     if loadModel == True:
         checkpoint = torch.load(OLD_PATH)
         cnn.load_state_dict(checkpoint['cnn_state_dict'])
         optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        for g in optimizer.param_groups:
+            g['lr'] = lr
         epoch = checkpoint['epoch']
         loss = checkpoint['loss']
         cnn = cnn.to(device)
@@ -61,13 +63,13 @@ def train_model(cnn, optimizer, scheduler, dataloader, dataset_sizes, device, lo
                 bboxes = [b.to(device) for b in bboxes]
                 bs = inputs.shape[0]
 
-                if count % 400 == 0 and epoch%4==0:
-                    print(phase)
-                    random_index = torch.randint(0, bs, (1,))[0]
-                    index = indices[random_index]
-                    print(index)
-                    draw_image_with_ancs_xyxy(all_images[phase][index], all_multi_bboxes[phase][index],
-                                              all_multi_labels[phase][index])
+                # if count % 400 == 0 and epoch%4==0:
+                #     print(phase)
+                #     random_index = torch.randint(0, bs, (1,))[0]
+                #     index = indices[random_index]
+                #     print(index)
+                #     draw_image_with_ancs_xyxy(all_images[phase][index], all_multi_bboxes[phase][index],
+                #                               all_multi_labels[phase][index])
 
                 # zero the parameter gradients
                 optimizer.zero_grad()
@@ -82,11 +84,11 @@ def train_model(cnn, optimizer, scheduler, dataloader, dataset_sizes, device, lo
                     loss = loss1 + loss2
                     lbb.append(loss1.item())
                     lc.append(loss2.item())
-                    if count % 400 == 0 and epoch%4==0:
-                            cnn.eval()
-                            l,c = cnn(inputs)
-                            inference(l[random_index], c[random_index], index, phase=phase)
-                            if phase=='train':cnn.train()
+                    # if count % 400 == 0 and epoch%4==0:
+                    #         cnn.eval()
+                    #         l,c = cnn(inputs)
+                    #         inference(l[random_index], c[random_index], index, phase=phase)
+                    #         if phase=='train':cnn.train()
                     # backward + optimize only if in training phase
                     if phase == 'train':
                         loss.backward()
