@@ -1,19 +1,22 @@
 import itertools
 import numpy as np
+import random
 import torch.nn as nn
 from torchvision import transforms
 from PIL import Image
 import matplotlib.pyplot as plt
 import torch
 # from shapely.geometry import Polygon
+import torchvision.transforms.functional as FT
 from matplotlib import patches
 use_cuda = torch.cuda.is_available()  # check if GPU exists
 device = torch.device("cuda" if use_cuda else "cpu")  # use CPU or GPU
 from DataLists import call_on_load
 call_on_load()
-from DataLists import all_images, all_multi_labels, all_multi_bboxes
-
+from DataLists import all_images, all_multi_labels, all_multi_bboxes, all_difficulties
+import os
 grid_sizes_list = list(itertools.chain([0.25] * 144, [0.5] * 36, [1.] * 9))
+
 
 transform = transforms.Compose([        transforms.Resize((300, 300)),
                                         transforms.ToTensor(),
@@ -297,6 +300,21 @@ def get_jaccard_tensor1(box1_xyxy, box2_xyxy):
 
     return intersection / union  # (n1, n2)
 
+def get_jaccard_tensor11(box1_xyxy, box2_xyxy):
+    # Find intersections
+    # box1_xyxy, box2_xyxy = box1_xyxy.to(device), box2_xyxy.to(device)
+    intersection = find_intersection(box1_xyxy, box2_xyxy)  # (n1, n2)
+
+    # Find areas of each box in both sets
+    areas_set_1 = (box1_xyxy[:, 2] - box1_xyxy[:, 0]) * (box1_xyxy[:, 3] - box1_xyxy[:, 1])  # (n1)
+    areas_set_2 = (box2_xyxy[:, 2] - box2_xyxy[:, 0]) * (box2_xyxy[:, 3] - box2_xyxy[:, 1])  # (n2)
+
+    # Find the union
+    # PyTorch auto-broadcasts singleton dimensions
+    union = areas_set_1.unsqueeze(1) + areas_set_2.unsqueeze(0) - intersection  # (n1, n2)
+
+    return intersection / union  # (n1, n2)
+
 
 
 
@@ -540,3 +558,328 @@ def subsampling(x, step):
         if s == None: continue
         x = x.index_select(dim=d, index=torch.arange(start=0, end=x.shape[d], step=s).long())
     return x
+
+
+# Some augmentations are taken from
+# https://github.com/sgrvinod/a-PyTorch-Tutorial-to-Object-Detection
+
+def transform(image, boxes, labels):
+    """
+    Apply the transformations above.
+
+    :param image: image, a PIL Image
+    :param boxes: bounding boxes in boundary coordinates, a tensor of dimensions (n_objects, 4)
+    :param labels: labels of objects, a tensor of dimensions (n_objects)
+    :param difficulties: difficulties of detection of these objects, a tensor of dimensions (n_objects)
+    :param split: one of 'TRAIN' or 'TEST', since different sets of transformations are applied
+    :return: transformed image, transformed bounding box coordinates, transformed labels, transformed difficulties
+    """
+
+    # Mean and standard deviation of ImageNet data that our base VGG from torchvision was trained on
+    # see: https://pytorch.org/docs/stable/torchvision/models.html
+    mean = [0.485, 0.456, 0.406]
+
+    new_image = image
+    new_boxes = boxes
+    new_labels = labels
+    # Skip the following operations for evaluation/testing
+    # A series of photometric distortions in random order, each with 50% chance of occurrence, as in Caffe repo
+    new_image = photometric_distort(new_image)
+
+    # Convert PIL image to Torch tensor
+    new_image = FT.to_tensor(new_image)
+
+    # Expand image (zoom out) with a 50% chance - helpful for training detection of small objects
+    # Fill surrounding space with the mean of ImageNet data that our base VGG was trained on
+    if random.random() < .5:
+        new_image, new_boxes = expand(new_image, boxes, filler=mean)
+
+    # Randomly crop image (zoom in)
+    new_image, new_boxes, new_labels = random_crop(new_image, new_boxes, new_labels)
+
+    # Convert Torch tensor to PIL image
+    new_image = FT.to_pil_image(new_image)
+
+    # Flip image with a 50% chance
+    if random.random() < .5:
+        new_image, new_boxes = flip(new_image, new_boxes)
+
+    return new_image, new_boxes, new_labels
+
+
+def expand(image, boxes, filler):
+    """
+    Perform a zooming out operation by placing the image in a larger canvas of filler material.
+
+    Helps to learn to detect smaller objects.
+
+    :param image: image, a tensor of dimensions (3, original_h, original_w)
+    :param boxes: bounding boxes in boundary coordinates, a tensor of dimensions (n_objects, 4)
+    :param filler: RBG values of the filler material, a list like [R, G, B]
+    :return: expanded image, updated bounding box coordinates
+    """
+    # Calculate dimensions of proposed expanded (zoomed-out) image
+    original_h = image.size(1)
+    original_w = image.size(2)
+    max_scale = 4
+    scale = random.uniform(1, max_scale)
+    new_h = int(scale * original_h)
+    new_w = int(scale * original_w)
+
+    # Create such an image with the filler
+    filler = torch.FloatTensor(filler)  # (3)
+    new_image = torch.ones((3, new_h, new_w), dtype=torch.float) * filler.unsqueeze(1).unsqueeze(1)  # (3, new_h, new_w)
+    # Note - do not use expand() like new_image = filler.unsqueeze(1).unsqueeze(1).expand(3, new_h, new_w)
+    # because all expanded values will share the same memory, so changing one pixel will change all
+
+    # Place the original image at random coordinates in this new image (origin at top-left of image)
+    left = random.randint(0, new_w - original_w)
+    right = left + original_w
+    top = random.randint(0, new_h - original_h)
+    bottom = top + original_h
+    new_image[:, top:bottom, left:right] = image
+
+    # Adjust bounding boxes' coordinates accordingly
+    new_boxes = boxes + torch.FloatTensor([left, top, left, top]).unsqueeze(0)  # (n_objects, 4), n_objects is the no. of objects in this image
+
+    return new_image, new_boxes
+
+
+def random_crop(image, boxes, labels):
+    """
+    Performs a random crop in the manner stated in the paper. Helps to learn to detect larger and partial objects.
+
+    Note that some objects may be cut out entirely.
+
+    Adapted from https://github.com/amdegroot/ssd.pytorch/blob/master/utils/augmentations.py
+
+    :param image: image, a tensor of dimensions (3, original_h, original_w)
+    :param boxes: bounding boxes in boundary coordinates, a tensor of dimensions (n_objects, 4)
+    :param labels: labels of objects, a tensor of dimensions (n_objects)
+    :return: cropped image, updated bounding box coordinates, updated labels, updated difficulties
+    """
+    original_h = image.size(1)
+    original_w = image.size(2)
+    # Keep choosing a minimum overlap until a successful crop is made
+    while True:
+        # Randomly draw the value for minimum overlap
+        min_overlap = random.choice([0., .1, .3, .5, .7, .9, None])  # 'None' refers to no cropping
+
+        # If not cropping
+        if min_overlap is None:
+            return image, boxes, labels
+
+        # Try up to 50 times for this choice of minimum overlap
+        # This isn't mentioned in the paper, of course, but 50 is chosen in paper authors' original Caffe repo
+        max_trials = 50
+        for _ in range(max_trials):
+            # Crop dimensions must be in [0.3, 1] of original dimensions
+            # Note - it's [0.1, 1] in the paper, but actually [0.3, 1] in the authors' repo
+            min_scale = 0.3
+            scale_h = random.uniform(min_scale, 1)
+            scale_w = random.uniform(min_scale, 1)
+            new_h = int(scale_h * original_h)
+            new_w = int(scale_w * original_w)
+
+            # Aspect ratio has to be in [0.5, 2]
+            aspect_ratio = new_h / new_w
+            if not 0.5 < aspect_ratio < 2:
+                continue
+
+            # Crop coordinates (origin at top-left of image)
+            left = random.randint(0, original_w - new_w)
+            right = left + new_w
+            top = random.randint(0, original_h - new_h)
+            bottom = top + new_h
+            crop = torch.FloatTensor([left, top, right, bottom])  # (4)
+
+            # Calculate Jaccard overlap between the crop and the bounding boxes
+            overlap = get_jaccard_tensor11(crop.unsqueeze(0),
+                                           boxes)  # (1, n_objects), n_objects is the no. of objects in this image
+            overlap = overlap.squeeze(0)  # (n_objects)
+
+            # If not a single bounding box has a Jaccard overlap of greater than the minimum, try again
+            if overlap.max().item() < min_overlap:
+                continue
+
+            # Crop image
+            new_image = image[:, top:bottom, left:right]  # (3, new_h, new_w)
+
+            # Find centers of original bounding boxes
+            bb_centers = (boxes[:, :2] + boxes[:, 2:]) / 2.  # (n_objects, 2)
+
+            # Find bounding boxes whose centers are in the crop
+            centers_in_crop = (bb_centers[:, 0] > left) * (bb_centers[:, 0] < right) * (bb_centers[:, 1] > top) * (
+                    bb_centers[:, 1] < bottom)  # (n_objects), a Torch uInt8/Byte tensor, can be used as a boolean index
+
+            # If not a single bounding box has its center in the crop, try again
+            if not centers_in_crop.any():
+                continue
+
+            # Discard bounding boxes that don't meet this criterion
+            new_boxes = boxes[centers_in_crop, :]
+            new_labels = labels[centers_in_crop]
+
+            # Calculate bounding boxes' new coordinates in the crop
+            new_boxes[:, :2] = torch.max(new_boxes[:, :2], crop[:2])  # crop[:2] is [left, top]
+            new_boxes[:, :2] -= crop[:2]
+            new_boxes[:, 2:] = torch.min(new_boxes[:, 2:], crop[2:])  # crop[2:] is [right, bottom]
+            new_boxes[:, 2:] -= crop[:2]
+
+            return new_image, new_boxes, new_labels
+
+
+def flip(image, boxes):
+    """
+    Flip image horizontally.
+
+    :param image: image, a PIL Image
+    :param boxes: bounding boxes in boundary coordinates, a tensor of dimensions (n_objects, 4)
+    :return: flipped image, updated bounding box coordinates
+    """
+    # Flip image
+    new_image = FT.hflip(image)
+
+    # Flip boxes
+    new_boxes = boxes
+    new_boxes[:, 0] = image.width - boxes[:, 0] - 1
+    new_boxes[:, 2] = image.width - boxes[:, 2] - 1
+    new_boxes = new_boxes[:, [2, 1, 0, 3]]
+
+    return new_image, new_boxes
+
+
+def photometric_distort(image):
+    """
+    Distort brightness, contrast, saturation, and hue, each with a 50% chance, in random order.
+
+    :param image: image, a PIL Image
+    :return: distorted image
+    """
+    new_image = image
+
+    distortions = [FT.adjust_brightness,
+                   FT.adjust_contrast,
+                   FT.adjust_saturation,
+                   FT.adjust_hue]
+
+    random.shuffle(distortions)
+
+    for d in distortions:
+        if random.random() < 0.5:
+            if d.__name__ is 'adjust_hue':
+                # Caffe repo uses a 'hue_delta' of 18 - we divide by 255 because PyTorch needs a normalized value
+                adjust_factor = random.uniform(-18 / 255., 18 / 255.)
+            else:
+                # Caffe repo uses 'lower' and 'upper' values of 0.5 and 1.5 for brightness, contrast, and saturation
+                adjust_factor = random.uniform(0.5, 1.5)
+
+            # Apply this distortion
+            new_image = d(new_image, adjust_factor)
+
+    return new_image
+
+
+def get_map(det_boxes, det_classes, det_scores, gt_boxes, gt_classes):
+    '''
+        please go through this wonderful explanation of map in object detection.
+        https://github.com/rafaelpadilla/Object-Detection-Metrics#average-precision
+    :param det_boxes:
+    :param det_classes:
+    :param det_scores:
+    :param gt_boxes:
+    :param gt_classes:
+    :return:
+    '''
+    TP = {}
+    FP = {}
+
+    for cls in range(20):
+        TP[cls] = []
+        FP[cls] = []
+
+    Objs = [0] * 20
+
+    x = len(det_boxes)
+
+    det_images = [[i] * len(j) for i, j in zip(range(len(det_boxes[:x])), det_boxes[:x])]
+    gt_images = [[i] * len(j) for i, j in zip(range(len(gt_boxes[:x])), gt_boxes[:x])]
+
+    det_images = torch.tensor([item for sublist in det_images for item in sublist])
+    gt_images = torch.tensor([item for sublist in gt_images for item in sublist])
+
+    det_boxes_, det_classes_, det_scores_, gt_boxes_, gt_classes_ = torch.cat(det_boxes[:x]), torch.cat(det_classes[:x]),\
+                                                                    torch.cat(det_scores[:x]), torch.cat(gt_boxes[:x]), torch.cat(gt_classes[:x])
+
+    is_available = torch.ones(gt_boxes_.shape[0])
+    cum_sum = np.array([i.shape[0] for i in gt_classes[:x]]).cumsum()
+    counts_objects = np.array([i.shape[0] for i in gt_classes[:x]])
+
+    for cls in range(20):
+
+        gt_mask, det_mask = gt_classes_ == cls, det_classes_ == cls
+
+        gt_images_cls, det_images_cls = gt_images[gt_mask], det_images[det_mask]
+        n_objs_gt_class = gt_mask.long().sum()
+        Objs[cls] += n_objs_gt_class
+
+        det_bb_class, det_score_class = det_boxes_[det_mask], det_scores_[det_mask]
+
+        det_score_class, sort_idx = det_score_class.sort(dim=0, descending=True)
+        det_bb_class = det_bb_class[sort_idx]
+        det_images_cls = det_images_cls[sort_idx]
+
+        if det_bb_class.shape[0] == 0:
+            continue
+
+        for i, det_bb in enumerate(det_bb_class):
+
+            image = det_images_cls[i]
+
+            gt_all_cls_this_image = gt_classes_[gt_images == image]
+            is_available_this_image = is_available[gt_images == image]
+
+            cls_mask = gt_all_cls_this_image == cls
+            gt_boxes_this = gt_boxes_[gt_images == image][cls_mask]
+
+            is_available_this_image_cls = is_available_this_image[cls_mask]
+
+            n_objs_gt_class = gt_boxes_this.shape[0]
+
+            if n_objs_gt_class == 0:
+                FP[cls].append(1.)
+                TP[cls].append(0.)
+                continue
+
+            det_bb = det_bb.unsqueeze(0)
+            iou = get_jaccard_tensor1(det_bb, gt_boxes_this)
+
+            overlap, idx = iou.squeeze(0).max(dim=0)
+            if overlap > 0.5:
+                if is_available_this_image_cls[idx] == 1:
+                    TP[cls].append(1.)
+                    FP[cls].append(0.)
+                    is_available[cum_sum[image] - counts_objects[image] + torch.arange(0, cls_mask.shape[0])[cls_mask][idx]] = 0
+                else:
+                    FP[cls].append(1.)
+                    TP[cls].append(0.)
+            else:
+                FP[cls].append(1.)
+                TP[cls].append(0.)
+
+    all_precisions = {}
+    for cls in range(20):
+        cum_TP, cum_FP = np.array(TP[cls]).cumsum(), np.array(FP[cls]).cumsum()
+        cum_precision = cum_TP / (cum_TP + cum_FP)
+        cum_recall = cum_TP / Objs[cls]
+        precisions = []
+        for rec in torch.arange(0, 1.1, 0.1):
+            recalls_mask = cum_recall >= rec
+            if recalls_mask.sum() != 0:
+                precisions.append(cum_precision[recalls_mask].max())
+            else:
+                precisions.append(0.)
+        all_precisions[cls] = np.array(precisions).mean()
+        print(cls, np.array(precisions).mean())
+
+    return all_precisions
