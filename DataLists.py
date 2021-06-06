@@ -1,80 +1,94 @@
-from fastai.vision import *
-import json
+import pandas as pd
+import xml.etree.ElementTree as ET
+import torch
+class_to_label = ['aeroplane', 'bicycle', 'bird', 'boat', 'bottle', 'bus', 'car', 'cat', 'chair', 'cow', 'diningtable',
+                  'dog', 'horse', 'motorbike', 'person', 'pottedplant', 'sheep', 'sofa', 'train', 'tvmonitor', "bg"]
 
-path = Path('pascal_2007/')
 
-train_images, train_lbl_bbox = get_annotations(path/'train.json')
-val_images, val_lbl_bbox = get_annotations(path/'valid.json')
-test_images, test_lbl_bbox = get_annotations(path/'test.json')
+def parse_xml(xml_path):
+    tree = ET.parse(xml_path)
+    root = tree.getroot()
+    difficulty = []
+    bbox_xyxy = []
+    labels = []
+    for object in root.iter('object'):
+        label = object.find('name').text.lower().strip()
+
+        if label not in class_to_label:
+            continue
+
+        difficulty.append(int(object.find('difficult').text == '1'))
+
+        xmin = int(float(object.find('bndbox').find('xmin').text)) - 1
+        xmax = int(float(object.find('bndbox').find('xmax').text)) - 1
+        ymin = int(float(object.find('bndbox').find('ymin').text)) - 1
+        ymax = int(float(object.find('bndbox').find('ymax').text)) - 1
+
+        bbox_xyxy.append([xmin, ymin, xmax, ymax])
+        labels.append(label)
+
+    return bbox_xyxy, labels, difficulty
+
 
 all_images = {}
 all_multi_labels = {}
 all_multi_bboxes = {}
+all_difficulties = {}
+
 
 def get_all_images(isTrainData=True):
-  all_images = []
-  if isTrainData:
-    for image in train_images+val_images:
-      all_images.append(path / 'train' / image)
-  else:
-    for image in test_images:
-      all_images.append(path / 'test' / image)
+    if isTrainData:
+        all_images = ['VOCdevkit/VOC2007/JPEGImages/{:06d}.jpg'.format(i) \
+                      for i in list(pd.read_csv('VOCdevkit/VOC2007/ImageSets/Main/trainval.txt', header=None,
+                                                names=['files']).files.values)]
+        all_images += ['VOCdevkit/VOC2012/JPEGImages/{}.jpg'.format(i) for i in \
+                       list(pd.read_csv('VOCdevkit/VOC2012/ImageSets/Main/trainval.txt', header=None,
+                                        names=['files']).files.values)]
+    else:
+        all_images = ['VOCdevkit/VOC2012/JPEGImages/{}.jpg'.format(i) \
+                      for i in list(
+                pd.read_csv('VOCdevkit/VOC2012/ImageSets/Main/test.txt', header=None, names=['files']).files.values)]
 
-  return all_images
+    return all_images
+
+
+def get_all_xml(isTrainData=True):
+    if isTrainData:
+        all_xml = ['VOCdevkit/VOC2007/Annotations/{:06d}.xml'.format(i) \
+                   for i in list(pd.read_csv('VOCdevkit/VOC2007/ImageSets/Main/trainval.txt', header=None,
+                                             names=['files']).files.values)]
+        all_xml += ['VOCdevkit/VOC2012/Annotations/{}.xml'.format(i) \
+                    for i in list(pd.read_csv('VOCdevkit/VOC2012/ImageSets/Main/trainval.txt', header=None,
+                                              names=['files']).files.values)]
+    else:
+        all_xml = ['VOCdevkit/VOC2012/Annotations/{}.xml'.format(i) \
+                   for i in list(
+                pd.read_csv('VOCdevkit/VOC2012/ImageSets/Main/test.txt', header=None, names=['files']).files.values)]
+    return all_xml
+
 
 def get_all_multi_labels(isTrainData=True):
-  all_multi_labels = []
-  if isTrainData:
-    for idx in range(len(train_images)):
-      all_multi_labels.append(train_lbl_bbox[idx][1])
-    for idx in range(len(val_images)):
-      all_multi_labels.append(val_lbl_bbox[idx][1])
+    all_multi_labels = []
+    all_multi_bboxes = []
+    all_difficulties = []
 
-  else:
-    for idx in range(len(test_images)):
-      all_multi_labels.append(test_lbl_bbox[idx][1])
+    xml_files = get_all_xml(isTrainData)
 
-  return all_multi_labels
-
-
-def convert_list_to_float(l):
-  l =  [float(i) for i in l]
-  l[0], l[1], l[2], l[3] = l[1], l[0], l[3], l[2]
-  return l
-
-
-def get_all_multi_bboxes(isTrainData=True):
-  all_multi_bboxes = []
-
-  if isTrainData:
-    for idx in range(len(train_images)):
-      l = train_lbl_bbox[idx][0]
-      f = [convert_list_to_float(i) for i in l]
-      all_multi_bboxes.append(f)
-
-    for idx in range(len(val_images)):
-      l = val_lbl_bbox[idx][0]
-      f = [convert_list_to_float(i) for i in l]
-      all_multi_bboxes.append(f)
-  else:
-    for idx in range(len(test_images)):
-      l = test_lbl_bbox[idx][0]
-      f = [convert_list_to_float(i) for i in l]
-      all_multi_bboxes.append(f)
-
-  return all_multi_bboxes
+    for xml_file in xml_files:
+        bbox_xyxy, labels, difficulty = parse_xml(xml_file)
+        all_multi_bboxes.append(bbox_xyxy)
+        all_multi_labels.append(labels)
+        all_difficulties.append((difficulty))
+    return all_multi_labels, all_multi_bboxes, all_difficulties
 
 
 def call_on_load():
-  global all_images, all_multi_labels, all_multi_bboxes
+    global all_images, all_multi_labels, all_multi_bboxes
 
-  all_images_tr_val, all_images_test = get_all_images(), get_all_images(isTrainData=False)
-  all_multi_bboxes_tr_val, all_multi_bboxes_test = get_all_multi_bboxes(), get_all_multi_bboxes(isTrainData=False)
-  all_multi_labels_tr_val, all_multi_labels_test = get_all_multi_labels(), get_all_multi_labels(isTrainData=False)
+    all_images_tr_val = get_all_images()
+    all_multi_labels_tr_val, all_multi_bboxes_tr_val, all_diff_tr_val = get_all_multi_labels()
 
-  all_images['train'] = all_images_tr_val
-  all_images['test'] = all_images_test
-  all_multi_bboxes['train'] = all_multi_bboxes_tr_val
-  all_multi_bboxes['test'] = all_multi_bboxes_test
-  all_multi_labels['train'] = all_multi_labels_tr_val
-  all_multi_labels['test'] = all_multi_labels_test
+    all_images['train'] = all_images_tr_val
+    all_multi_bboxes['train'] = all_multi_bboxes_tr_val
+    all_multi_labels['train'] = all_multi_labels_tr_val
+    all_difficulties['train'] = all_diff_tr_val
