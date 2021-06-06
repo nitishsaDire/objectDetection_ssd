@@ -41,8 +41,10 @@ Loss function is plotted below:
 
 Inference Results:
 
-![plot](./Images/te1.png)
-![plot](./Images/te11.png)
+<img src="./Images/te1.png" width="400" height="400"><img src="./Images/te11.png" width="400" height="400">
+
+
+![](./Images/te1.png) ![](./Images/te11.png)
 
 ![plot](./Images/te2.png)
 ![plot](./Images/te22.png)
