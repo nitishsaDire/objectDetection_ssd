@@ -47,7 +47,7 @@ Loss function is plotted below:
 ![plot](./Images/loss_fn.png)
 
 ## Inference Results On Validation Dataset
-(in pairs of two, above one is gt and below one is prediciton:
+(in pairs of two, above one is gt and below one is prediction:
 
 ![](./Images/te1.png)
 
