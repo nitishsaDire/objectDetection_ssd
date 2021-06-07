@@ -37,8 +37,9 @@ The combined effect is model is trained to find objects and also trained to diff
 on the training dataset. I will be training it on combined PASCAL VOC 2007
 trainval + PASCAL VOC 2012 trainval, and will also add augmentations. The new model and its results
 will be available soon.~~
-I have trained on PASCAL VOC 2007 + 2012 trainval dataset.
-Model trained paramters could be taken from
+I have trained on PASCAL VOC 2007 + 2012 trainval dataset, and 10% out of this
+ is kept for validation purpose.
+Model trained parameters could be taken from
 https://drive.google.com/file/d/1pPYFl19F-Wjgb4ZGU5gklPS9QY0t6atq/view?usp=sharing
 
 Loss function is plotted below:
