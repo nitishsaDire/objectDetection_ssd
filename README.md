@@ -26,8 +26,11 @@ are called are positive one, otherwise negative one. For the loss function
 CCE loss is used for classification and L1 loss is used for generating bounding box
 coordinates.
 
-Hard Negative Mining is used because most of the priors don't have an object, which can lead to a model which is trained to detect background, rather than
-An object. To balance this problem what can we do is we can find out the anchors where the model was sure it is no background, but ground-truth was background,
+Hard Negative Mining is used to decrease the False Positives in the predictions. Because most of the priors don't have
+ an object, and positive anchors are those overlap with gt objects above threshold. So penalizing only positive anchors' 
+ predictions could lead to a model which is not trained to detect background, i.e poor in detecting backgrounds. 
+ To balance this problem what we can do is we find out the anchors where the model was sure about
+its prediction (which is not background), but ground-truth was background,
 i.e those anchors where the model detects background poorly and we can include those anchors' cce in the loss.
 The combined effect is model is trained to find objects and also trained to differentiate whether background or not.
 
